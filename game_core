@@ -1,0 +1,258 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Module Name: game_core
+// Description: LED Catcher game core with multi-burst fireworks win animation
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module game_core(
+    input clk,
+    input reset,
+    input [15:0] sw,
+    output reg [15:0] led,
+    output reg [7:0] score
+    );
+
+    // --- original game timers/state ---
+    reg [24:0] move_timer;
+    reg [28:0] pause_timer;
+
+    reg [27:0] gameover_timer;
+    reg [23:0] blink_timer;
+    reg blink_state;
+
+    reg [3:0] pos;
+    reg dir;            // 0 = right, 1 = left
+    reg stopped;        // 0 = running, 1 = paused for 3 seconds
+    reg game_over;      // 1 = reached 5 points
+
+    reg [15:0] switch_prev;
+    wire [15:0] switch_rise;
+
+    assign switch_rise = sw & ~switch_prev;
+
+    // --- fireworks animation state ---
+    reg [3:0] win_pos;         // where the winning catch happened
+    reg [3:0] fw_radius;       // expansion radius, 0..15
+    reg [22:0] fw_step_timer;  // timer between radius steps
+    reg [1:0] fw_phase;        // 0=expand, 1=blink, 2=contract, 3=hold
+    reg [2:0] fw_burst_count;  // how many bursts have played
+
+    localparam TOTAL_BURSTS = 3'd3;  // play 3 fireworks bursts before holding
+
+    always @(posedge clk or posedge reset)
+    begin
+        if (reset)
+        begin
+            move_timer     <= 0;
+            pause_timer    <= 0;
+            gameover_timer <= 0;
+            blink_timer    <= 0;
+            pos            <= 0;
+            dir            <= 0;
+            stopped        <= 0;
+            game_over      <= 0;
+            blink_state    <= 0;
+            score          <= 0;
+            switch_prev    <= sw;
+            win_pos        <= 0;
+            fw_radius      <= 0;
+            fw_step_timer  <= 0;
+            fw_phase       <= 0;
+            fw_burst_count <= 0;
+        end
+        else
+        begin
+          if (stopped == 0 && game_over == 0)
+            switch_prev <= sw;
+            if (game_over == 0)
+            begin
+                if (stopped == 0)
+                begin
+                    if (switch_rise[pos])
+                    begin
+                        if (score == 8'd4)
+                        begin
+                            score <= 8'd5;
+                            game_over <= 1;
+                            gameover_timer <= 0;
+                            blink_timer <= 0;
+                            blink_state <= 1;
+                            win_pos <= pos;
+                            fw_radius <= 0;
+                            fw_step_timer <= 0;
+                            fw_phase <= 0;
+                            fw_burst_count <= 0;
+                        end
+                        else
+                        begin
+                            score <= score + 1;
+                            stopped <= 1;
+                            pause_timer <= 0;
+                            move_timer <= 0;
+                        end
+                    end
+
+                    else if ((switch_rise != 16'b0) && (switch_rise[pos] == 0))
+                    begin
+                        if (score > 0)
+                            score <= score - 1;
+                    end
+                    else if (move_timer == 25'd20000000) // Move LED every 200 ms
+                    begin
+                        move_timer <= 0;
+
+                        if (dir == 0)
+                        begin
+                            if (pos == 4'd15)
+                            begin
+                                dir <= 1;
+                                pos <= 4'd14;
+                            end
+                            else
+                                pos <= pos + 1;
+                        end
+                        else
+                        begin
+                            if (pos == 4'd0)
+                            begin
+                                dir <= 0;
+                                pos <= 4'd1;
+                            end
+                            else
+                                pos <= pos - 1;
+                        end
+                    end
+                    else
+                        move_timer <= move_timer + 1;
+                end
+                else
+                begin
+                    if (pause_timer == 29'd300000000) // Pause for 3 seconds after a correct catch
+                    begin
+                        stopped <= 0;
+                        pause_timer <= 0;
+                    end
+                    else
+                        pause_timer <= pause_timer + 1;
+                end
+            end
+            else
+            begin
+                // --- fireworks animation (loops TOTAL_BURSTS times) ---
+
+                // Phase 0: Expand outward from win_pos
+                if (fw_phase == 2'd0)
+                begin
+                    if (fw_step_timer == 23'd5000000) // 50 ms per step
+                    begin
+                        fw_step_timer <= 0;
+                        if (fw_radius == 4'd15)
+                        begin
+                            fw_phase <= 2'd1;
+                            fw_radius <= 0;
+                            blink_timer <= 0;
+                            blink_state <= 1;
+                            gameover_timer <= 0;
+                        end
+                        else
+                            fw_radius <= fw_radius + 1;
+                    end
+                    else
+                        fw_step_timer <= fw_step_timer + 1;
+                end
+                // Phase 1: All blink rapidly
+                else if (fw_phase == 2'd1)
+                begin
+                    if (gameover_timer < 28'd100000000) // 1 s of blinking
+                    begin
+                        gameover_timer <= gameover_timer + 1;
+                        if (blink_timer == 24'd5000000) // 50 ms blink
+                        begin
+                            blink_timer <= 0;
+                            blink_state <= ~blink_state;
+                        end
+                        else
+                            blink_timer <= blink_timer + 1;
+                    end
+                    else
+                    begin
+                        fw_phase <= 2'd2;
+                        gameover_timer <= 0;
+                        fw_radius <= 4'd15;
+                        fw_step_timer <= 0;
+                    end
+                end
+                // Phase 2: Contract back to win_pos
+                else if (fw_phase == 2'd2)
+                begin
+                    if (fw_step_timer == 23'd3000000) // 30 ms per step
+                    begin
+                        fw_step_timer <= 0;
+                        if (fw_radius == 4'd0)
+                        begin
+                            // Burst complete - decide whether to loop or hold
+                            if (fw_burst_count == TOTAL_BURSTS - 1)
+                            begin
+                                fw_phase <= 2'd3;  // done, hold solid
+                            end
+                            else
+                            begin
+                                fw_burst_count <= fw_burst_count + 1;
+                                fw_phase <= 2'd0;  // start another burst
+                                fw_radius <= 0;
+                                fw_step_timer <= 0;
+                            end
+                        end
+                        else
+                            fw_radius <= fw_radius - 1;
+                    end
+                    else
+                        fw_step_timer <= fw_step_timer + 1;
+                end
+                // Phase 3: hold solid forever (until reset)
+            end
+        end
+    end
+
+    // --- LED output logic ---
+    integer i;
+    reg [15:0] fw_pattern;
+    reg [4:0] diff;
+
+    always @(*)
+    begin
+        fw_pattern = 16'b0;
+        diff = 0;
+
+        if (game_over == 1)
+        begin
+            if (fw_phase == 2'd0 || fw_phase == 2'd2)
+            begin
+                // Light up LEDs within fw_radius of win_pos (absolute diff)
+                for (i = 0; i < 16; i = i + 1)
+                begin
+                    if (i[3:0] >= win_pos)
+                        diff = i[3:0] - win_pos;
+                    else
+                        diff = win_pos - i[3:0];
+
+                    if (diff <= fw_radius)
+                        fw_pattern[i] = 1'b1;
+                end
+                led = fw_pattern;
+            end
+            else if (fw_phase == 2'd1)
+            begin
+                led = blink_state ? 16'hFFFF : 16'h0000;
+            end
+            else // phase 3: hold solid
+            begin
+                led = 16'hFFFF;
+            end
+        end
+        else
+            led = 16'b1 << pos;
+    end
+
+endmodule
