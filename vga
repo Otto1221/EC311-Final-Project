@@ -1,0 +1,286 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Module Name: vga
+// Description: VGA display for LED Catcher Game
+//   - Disco background: color shifts on every catch, strobes during game-over
+//   - Score display: two large digits (tens + ones) centered on screen
+// Based on the original vga.v (state-machine VGA generator), modified to render
+// game state instead of a static color test pattern.
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module vga(
+    input in_clk,             // 100 MHz system clock
+    input [7:0] score,        // score from game_core
+    output reg [3:0] VGA_R,
+    output reg [3:0] VGA_G,
+    output reg [3:0] VGA_B,
+    output reg VGA_HS,
+    output reg VGA_VS
+    );
+
+    wire clock;
+    Clock_divider CD(in_clk, clock);
+
+    reg [31:0] count, vertical_count;
+    reg [31:0] vertical_position, horizontal_position;
+    reg [1:0] vertical_state, horizontal_state;
+    reg vertical_trigger, vertical_blank;
+
+    initial begin
+        vertical_position = 0;
+        count = 1;
+        vertical_count = 1;
+        horizontal_position = 0;
+        vertical_state = 3;
+        horizontal_state = 3;
+        VGA_HS = 1;
+        VGA_VS = 1;
+        VGA_R = 0;
+        VGA_G = 0;
+        VGA_B = 0;
+        vertical_trigger = 0;
+        vertical_blank = 1;
+    end
+
+    // ==================================================
+    // Catch detection: watch score for increments
+    // ==================================================
+    reg [7:0] score_prev;
+    wire catch_pulse = (score > score_prev);
+    wire game_over   = (score == 8'd5);
+
+    always @(posedge in_clk) begin
+        score_prev <= score;
+    end
+
+    // ==================================================
+    // Disco color generator - LFSR + strobe timer
+    // ==================================================
+    reg [11:0] lfsr = 12'hACE;       // non-zero seed
+    reg [21:0] strobe_timer = 0;
+    reg [11:0] bg_color = 12'h008;   // start blue
+
+    wire lfsr_fb = lfsr[11] ^ lfsr[10] ^ lfsr[9] ^ lfsr[3];
+
+    always @(posedge in_clk) begin
+        lfsr <= {lfsr[10:0], lfsr_fb};
+
+        if (game_over) begin
+            if (strobe_timer == 22'd4000000) begin  // ~40 ms strobe
+                strobe_timer <= 0;
+                bg_color <= lfsr;
+            end else
+                strobe_timer <= strobe_timer + 1;
+        end else if (catch_pulse) begin
+            bg_color <= lfsr;
+            strobe_timer <= 0;
+        end
+    end
+
+    // ==================================================
+    // Digit bitmap lookup (3x5 blocks)
+    //   bit 14 = top-left, bit 0 = bottom-right
+    //   row 0 = bits [14:12], row 4 = bits [2:0]
+    // ==================================================
+    function [14:0] digit_bitmap(input [3:0] d);
+        case (d)
+            4'd0: digit_bitmap = 15'b111_101_101_101_111;
+            4'd1: digit_bitmap = 15'b010_110_010_010_111;
+            4'd2: digit_bitmap = 15'b111_001_111_100_111;
+            4'd3: digit_bitmap = 15'b111_001_111_001_111;
+            4'd4: digit_bitmap = 15'b101_101_111_001_001;
+            4'd5: digit_bitmap = 15'b111_100_111_001_111;
+            4'd6: digit_bitmap = 15'b111_100_111_101_111;
+            4'd7: digit_bitmap = 15'b111_001_010_010_010;
+            4'd8: digit_bitmap = 15'b111_101_111_101_111;
+            4'd9: digit_bitmap = 15'b111_101_111_001_111;
+            default: digit_bitmap = 15'b0;
+        endcase
+    endfunction
+
+    // ==================================================
+    // Digit geometry
+    //   BLOCK = 40 px, digit is 3x5 blocks = 120x200 px
+    //   Two digits with a 40 px gap = 280 px total
+    //   Centered on 640x480: starts at x=180, y=140
+    // ==================================================
+    // TENS_X = 180, ONES_X = 340, DIGIT_Y = 140
+
+    // Current digit pixel info - registered along with VGA output
+    reg [3:0] pixel_r, pixel_g, pixel_b;
+
+    // Helper combinational logic to decide pixel color
+    reg in_tens, in_ones;
+    reg [9:0] dx, dy;
+    reg [3:0] cur_digit;
+    reg [14:0] bitmap;
+    reg [3:0] bit_idx;
+    reg digit_on;
+
+    always @(*) begin
+        // Default
+        in_tens = 0;
+        in_ones = 0;
+        dx = 0;
+        dy = 0;
+        cur_digit = 0;
+        bitmap = 0;
+        bit_idx = 0;
+        digit_on = 0;
+
+        // Is current pixel inside the tens digit region?
+        if (horizontal_position >= 180 && horizontal_position < 300 &&
+            vertical_position   >= 140 && vertical_position   < 340) begin
+            in_tens = 1;
+            dx = horizontal_position - 180;
+            dy = vertical_position - 140;
+            cur_digit = score / 10;
+        end
+        else if (horizontal_position >= 340 && horizontal_position < 460 &&
+                 vertical_position   >= 140 && vertical_position   < 340) begin
+            in_ones = 1;
+            dx = horizontal_position - 340;
+            dy = vertical_position - 140;
+            cur_digit = score % 10;
+        end
+
+        if (in_tens || in_ones) begin
+            bitmap = digit_bitmap(cur_digit);
+            // block_col = dx/40 (0..2), block_row = dy/40 (0..4)
+            bit_idx = 14 - ((dy / 40) * 3 + (dx / 40));
+            digit_on = bitmap[bit_idx];
+
+            // Blank tens when score < 10
+            if (in_tens && (score < 10))
+                digit_on = 0;
+        end
+
+        // Pixel color: white on digit, disco color on background
+        if (digit_on) begin
+            pixel_r = 4'hF;
+            pixel_g = 4'hF;
+            pixel_b = 4'hF;
+        end else begin
+            pixel_r = bg_color[11:8];
+            pixel_g = bg_color[7:4];
+            pixel_b = bg_color[3:0];
+        end
+    end
+
+    /////////// BEGIN HORIZONTAL STATE MACHINE //////////////
+    always @(posedge clock)
+    begin
+        if (horizontal_state == 0)
+        begin
+            // blank for 48 cycles
+            if (count == 47) begin
+                count <= 1;
+                horizontal_state <= 1;
+                vertical_trigger <= 1;
+            end
+            else
+            begin
+                vertical_trigger <= 0;
+                count <= count + 1;
+            end
+        end
+        else if (horizontal_state == 1)
+        begin
+            // shift out 640 pixels
+            if (horizontal_position == 640)
+            begin
+                VGA_R <= 0;
+                VGA_G <= 0;
+                VGA_B <= 0;
+                horizontal_position <= 0;
+                horizontal_state <= 2;
+            end
+            else
+            begin
+                if (vertical_blank == 0)
+                begin
+                    VGA_R <= pixel_r;
+                    VGA_G <= pixel_g;
+                    VGA_B <= pixel_b;
+                end
+                else
+                begin
+                    VGA_R <= 0;
+                    VGA_G <= 0;
+                    VGA_B <= 0;
+                end
+                horizontal_position <= horizontal_position + 1;
+            end
+        end
+        else if (horizontal_state == 2)
+        begin
+            if (count == 16) begin
+                count <= 1;
+                VGA_HS <= 0;
+                horizontal_state <= 3;
+            end
+            else
+                count <= count + 1;
+        end
+        else // 3
+        begin
+            if (count == 96) begin
+                VGA_HS <= 1;
+                count <= 1;
+                horizontal_state <= 0;
+            end
+            else
+                count <= count + 1;
+        end
+    end
+
+    /////////// BEGIN VERTICAL STATE MACHINE //////////////
+    always @(posedge vertical_trigger)
+    begin
+        if (vertical_state == 0)
+        begin
+            if (vertical_count == 32) begin
+                vertical_count <= 1;
+                vertical_state <= 1;
+            end
+            else
+                vertical_count <= vertical_count + 1;
+        end
+        else if (vertical_state == 1)
+        begin
+            if (vertical_position == 480)
+            begin
+                vertical_position <= 0;
+                vertical_state <= 2;
+                vertical_blank <= 1;
+            end
+            else
+            begin
+                vertical_blank <= 0;
+                vertical_position <= vertical_position + 1;
+            end
+        end
+        else if (vertical_state == 2)
+        begin
+            if (vertical_count == 10) begin
+                vertical_count <= 1;
+                VGA_VS <= 0;
+                vertical_state <= 3;
+            end
+            else
+                vertical_count <= vertical_count + 1;
+        end
+        else // 3
+        begin
+            if (vertical_count == 2) begin
+                VGA_VS <= 1;
+                vertical_count <= 1;
+                vertical_state <= 0;
+            end
+            else
+                vertical_count <= vertical_count + 1;
+        end
+    end
+
+endmodule
