@@ -1,0 +1,51 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Module Name: led_catcher_top
+// Description: Top module for LED Catcher Game with VGA display
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module led_catcher_top(
+    input clk,
+    input reset,
+    input [15:0] sw,
+    output [15:0] led,
+    output [6:0] seg,
+    output [7:0] digit_enable,
+    // VGA outputs
+    output [3:0] VGA_R,
+    output [3:0] VGA_G,
+    output [3:0] VGA_B,
+    output VGA_HS,
+    output VGA_VS
+    );
+
+    wire [7:0] score;
+
+    game_core game(
+        .clk(clk),
+        .reset(reset),
+        .sw(sw),
+        .led(led),
+        .score(score)
+    );
+
+    score_display display(
+        .clk(clk),
+        .reset(reset),
+        .score(score),
+        .digit_enable(digit_enable),
+        .seg(seg)
+    );
+
+    vga vga_inst(
+        .in_clk(clk),
+        .score(score),
+        .VGA_R(VGA_R),
+        .VGA_G(VGA_G),
+        .VGA_B(VGA_B),
+        .VGA_HS(VGA_HS),
+        .VGA_VS(VGA_VS)
+    );
+
+endmodule
